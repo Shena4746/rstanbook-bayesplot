@@ -1,0 +1,207 @@
+---
+title: "Figures on Ch5"
+output: github_document
+---
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+使用するライブラリ群: 
+```{r libraries, message=FALSE}
+library(tidyverse)
+library(rstan)
+library(rstanarm)
+library(bayesplot)
+# enable multicore calculation
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+```{r functions, include=FALSE}
+# function for handling csv on web
+get_data_from_url <- function(url) {
+    readr::read_csv(RCurl::getURL(url))
+}
+```
+
+## Model 5-3 重回帰
+
+<!-- data preparation -->  
+```{r model5-3_data, include = FALSE}
+data_url1 <- "https://raw.githubusercontent.com/MatsuuraKentaro/RStanBook/master/chap05/input/data-attendance-1.txt"
+stan_path <- "./stan/model5-3.stan"
+d <- get_data_from_url(data_url1)
+data <- list(N = nrow(d), A = d$A, Score = d$Score / 200, Y = d$Y)
+```
+
+学生達のある1年間の出席率を
+- カテゴリ変数`A`: アルバイトが好きかどうか
+- 連続値変数`Score`: 学問への興味の強さ
+の二変数で線形回帰する, というもの.
+
+モデルを記述したstanファイルとモデルに食わせるデータは所与して, 以下のように出力を得たとする.
+もしこれらの中身が気になったなら書籍のサポートページに飛ぶべし.
+```{r model5-3_output, message = FALSE}
+fit <- stan(file = stan_path, data = data, seed = 1234)
+ms <- rstan::extract(fit)
+```
+
+### Figure 5-2
+モデルのあてはまりの良さを可視化するために, 80%信頼区間の上に観測データをプロットする.
+
+`bayesplot::ppc_ribbon_grouped`に投げる.
+`facet_args`は`bayesplot::ppc_ribbon_grouped`が呼び出す`ggplot::facet_wrap`に与えるパラメーターを`list`形式で受け取る. `labeller`を以下のように与えないと`group: 0`のように表示されるので, 明示的に`as_labeller`によって表示形式を指定している.
+```{r Figure5-2, echo = TRUE}
+color_scheme_set("brightblue")
+bayesplot::ppc_ribbon_grouped(y = d$Y, yrep = ms$y_pred, x = d$Score, group = d$A, facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1"))), prob_outer = 0.8, y_draw = "both") +
+    panel_bg(fill = "gray90", color = NA) +
+    grid_lines(color = "white") +
+    labs(x = "Score", y = "Observed and Predicted y", title = "50% and 80% posterior predictive zone of Y vs Score")
+```
+
+### Figure 5-3
+説明変数が増えてプロットの次元が上がると先の方法による可視化は難しくなる.
+説明変数が増えても可能な方法としては, 実測値と予測値の比較, 推定されたノイズの分布確認などがある.
+前者は, 呼び出す関数が`bayesplot::ppc_intervals_grouped`に変わるだけで, やっていることは一つ前と実質同じ.
+```{r Figure5-3, echo = TRUE}
+color_scheme_set("purple")
+bayesplot::ppc_intervals_grouped(y = d$Y, yrep = ms$y_pred, x = d$Y, group = d$A, facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))) +
+    panel_bg(fill = "gray90", color = NA) +
+    grid_lines(color = "white") +
+    labs(x = "Observed y", y = "Predicted y", title = "50% and 80% posterior predictive interval of Y")
+```
+
+### Figure 5-4
+ノイズが正規分布に従うと仮定していたので, 後者のノイズの分布確認は, ノイズの分布と正規分布の比較をすればよい. 本ではヒストグラムを描いていたが, ここではより手軽にQQ-plotを使う.
+
+`ms$noise`は`.stan`内の`generated quantities`として生成されているとする(Exercise5-2).
+この`ms$noise`の最頻値を持つ`noise_df`を作ってプロットする.
+```{r noise_df, echo = TRUE}
+noise_df <- ms$noise %>%
+    apply(2, function(x) {
+        dens <- density(x)
+        mode_x <- dens$x[which.max(dens$y)]
+    }) %>%
+    data.frame() %>%
+    magrittr::set_colnames("err_mode") %>%
+    mutate(A = d$A) # optional. used only in geom_qq
+```
+お手軽にプロットするならR base graphsが便利.
+```{r plot_qqnorm, echo = TRUE}
+qqnorm(noise_df$err_mode)
+qqline(noise_df$err_mode, col = "red")
+```
+
+カテゴリ変数`A`でプロットを分けたいなら`ggplot`の`geom_qq_xxxx`.
+```{r plot_geom_qq, echo = TRUE}
+noise_df %>%
+    ggplot(mapping = aes(sample = err_mode, color = factor(A))) +
+    geom_qq_line() +
+    geom_qq() +
+    guides(color = guide_legend("A")) +
+    labs(title = "Normal QQ-plot of MAP error")
+```
+
+## Model 5-4 二項ロジスティック回帰
+<!-- preparation -->  
+```{r model5-4_data, include = FALSE}
+data_url2 <- "https://raw.githubusercontent.com/MatsuuraKentaro/RStanBook/master/chap05/input/data-attendance-2.txt"
+d <- get_data_from_url(data_url2)
+stan_path <- "./stan/model5-4.stan"
+data <- list(N = nrow(d), A = d$A, Score = d$Score / 200, M = d$M, Y = d$Y)
+```
+
+- カテゴリ変数`A`: アルバイトが好きかどうか
+- 連続値変数`Score`: 学問への興味の強さ
+- 正整数変数`M`: 履修登録した科目の総授業回数
+の3変数で
+- 応答変数`Y`: 実際に出席した回数
+を二項ロジスティック回帰で説明する.
+
+```{r model5-4_output, message = FALSE}
+fit <- stan(file = stan_path, data = data, seed = 1234)
+ms <- rstan::extract(fit)
+```
+
+### Figure 5-8
+実測値と予測値をプロットする. Figure 5-4 とやることは同じ.
+```{r Figure5-8, echo = TRUE}
+color_scheme_set("purple")
+bayesplot::ppc_intervals_grouped(y = d$Y, yrep = ms$y_pred, x = d$Y, group = d$A, facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))) +
+    panel_bg(fill = "gray90", color = NA) +
+    grid_lines(color = "white") +
+    labs(x = "Observed y", y = "Predicted y", title = "50% and 80% posterior predictive interval of Y")
+```
+
+## Model 5-5 ロジスティック回帰
+```{r model5-5_data, include = FALSE}
+data_url3 <- "https://raw.githubusercontent.com/MatsuuraKentaro/RStanBook/master/chap05/input/data-attendance-3.txt"
+d <- get_data_from_url(data_url3)
+stan_path <- "./stan/model5-5.stan"
+cdn <- c(0, 0.2, 1)
+names(cdn) <- c("A", "B", "C")
+data <- list(N = nrow(d), A = d$A, Score = d$Score / 200, Weather = cdn[d$Weather], Y = d$Y)
+```
+- カテゴリ変数`A`: アルバイトが好きかどうか
+- 連続値変数`Score`: 学問への興味の強さ
+- カテゴリ変数`Weather`: 当日の天気(晴れ, 曇り, 雨)
+の3変数で
+- 2値応答変数`Y`: その日出席したかどうか
+をロジスティック回帰で説明する.
+
+```{r model5-5_output, message = FALSE}
+fit <- stan(file = stan_path, data = data, seed = 1234)
+ms <- rstan::extract(fit)
+```
+### Figure 5-10
+予測された出席確率と実測値をプロットしてあてはまりの良さを確認する.
+ここでは, `bayesplot::ppc_scatter_avg_data`で(実測値, 予測確率, カテゴリA)の情報を持ったデータフレームを吐かせ, それをもとに`ggplot`でヴァイオリンプロットを描く.
+```{r figure5-10, echo = TRUE}
+# process data for plot
+data_plot <- bayesplot::ppc_scatter_avg_data(y = d$Y, yrep = ms$q, group = d$A) %>% transmute(A = group, y_obs = factor(y_obs), prob_pred = value)
+# plot
+data_plot %>%
+    ggplot(aes(x = prob_pred, y = y_obs)) +
+    facet_wrap(~A, ncol = 2, scales = "free_x", labeller = label_both) +
+    geom_violin(trim = FALSE, size = 1, color = "grey80") +
+    geom_point(aes(color = y_obs), position = position_jitter(w = 0, h = 0.2), size = 1, alpha = 0.5) +
+    guides(color = "none") +
+    labs(x = "Predicted Probability", y = "Y Observed", title = "Violin plot of Observed Y vs Predicted Probability")
+```
+
+## Model 5-6 ポアソン回帰
+<!-- preparation -->  
+```{r model5-6_data, include = FALSE}
+d <- get_data_from_url(data_url2)
+stan_path <- "./stan/model5-6exp.stan"
+data <- list(N = nrow(d), A = d$A, Score = d$Score / 200, M = d$M)
+```
+- カテゴリ変数`A`: アルバイトが好きかどうか
+- 連続値変数`Score`: 学問への興味の強さ
+の2変数で
+- 正整数応答変数`M`: 履修登録した科目の総授業回数
+をPoisson回帰で説明する.
+
+```{r model5-6_output, message = FALSE}
+fit <- stan(file = stan_path, data = data, seed = 1234)
+ms <- rstan::extract(fit)
+```
+実測値と予測値のプロットは以前と同じ方法で書ける.
+```{r plot_ppc_model5-6, echo = TRUE}
+color_scheme_set("purple")
+bayesplot::ppc_intervals_grouped(y = d$M, yrep = ms$m_pred, x = d$M, group = d$A, facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))) +
+    panel_bg(fill = "gray90", color = NA) +
+    grid_lines(color = "white") +
+    labs(x = "Observed y", y = "Predicted y", title = "50% and 80% posterior predictive interval of M")
+```
+
+`A`や`Score`の変動が応答変数`M`に与える限界効果は`bayesplot::mcmc_area`などでプロットできる. この場合, stanファイルの中で`exp(A)`などのプロットしたい変数のMCMCサンプルを生成しておく必要がある.
+```{r plot_MAE_model5-6, echo = TRUE, message=FALSE}
+color_scheme_set("blue")
+mcmc_areas(fit, pars = c("A_MAE", "Score_MAE[10]", "Score_MAE[5]", "Score_MAE[1]"), prob = 0.90, prob_outer = 0.95) +
+    scale_y_discrete(labels = c("A_MAE" = "A 0->1", "Score_MAE[1]" = "Score +10", "Score_MAE[5]" = "Score +50", "Score_MAE[10]" = "Score +100")) +
+    grid_lines(color = "gray80") +
+    labs(title = "95% Posterior Credible Intervals of Marginal Effect of Score and A factor", x = "Marginal Effect on Y (times)")
+```
