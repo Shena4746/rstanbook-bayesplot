@@ -36,10 +36,14 @@ d <- get_data_from_url(data_url1)
 data <- list(N = nrow(d), A = d$A, Score = d$Score / 200, Y = d$Y)
 ```
 
-学生達のある1年間の出席率を
 - カテゴリ変数`A`: アルバイトが好きかどうか
 - 連続値変数`Score`: 学問への興味の強さ
-の二変数で線形回帰する, というもの.
+
+の二変数で
+
+- 連続値変数`Y`: 学生達の1年間の出席率
+
+を線形回帰する.
 
 モデルを記述したstanファイルとモデルに食わせるデータは所与して, 以下のように出力を得たとする.
 もしこれらの中身が気になったなら書籍のサポートページに飛ぶべし.
@@ -49,13 +53,19 @@ ms <- rstan::extract(fit)
 ```
 
 ### Figure 5-2
-モデルのあてはまりの良さを可視化するために, 80%信頼区間の上に観測データをプロットする.
+モデルのあてはまり具合を可視化するために, 80%信頼区間の上に観測データをプロットする.
 
 `bayesplot::ppc_ribbon_grouped`に投げる.
 `facet_args`は`bayesplot::ppc_ribbon_grouped`が呼び出す`ggplot::facet_wrap`に与えるパラメーターを`list`形式で受け取る. `labeller`を以下のように与えないと`group: 0`のように表示されるので, 明示的に`as_labeller`によって表示形式を指定している.
 ```{r Figure5-2, echo = TRUE}
 color_scheme_set("brightblue")
-bayesplot::ppc_ribbon_grouped(y = d$Y, yrep = ms$y_pred, x = d$Score, group = d$A, facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1"))), prob_outer = 0.8, y_draw = "both") +
+bayesplot::ppc_ribbon_grouped(
+    y = d$Y,
+    yrep = ms$y_pred,
+    x = d$Score,
+    group = d$A,
+    facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1"))), prob_outer = 0.8, y_draw = "both"
+) +
     panel_bg(fill = "gray90", color = NA) +
     grid_lines(color = "white") +
     labs(x = "Score", y = "Observed and Predicted y", title = "50% and 80% posterior predictive zone of Y vs Score")
@@ -67,37 +77,63 @@ bayesplot::ppc_ribbon_grouped(y = d$Y, yrep = ms$y_pred, x = d$Score, group = d$
 前者は, 呼び出す関数が`bayesplot::ppc_intervals_grouped`に変わるだけで, やっていることは一つ前と実質同じ.
 ```{r Figure5-3, echo = TRUE}
 color_scheme_set("purple")
-bayesplot::ppc_intervals_grouped(y = d$Y, yrep = ms$y_pred, x = d$Y, group = d$A, facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))) +
+bayesplot::ppc_intervals_grouped(
+    y = d$Y,
+    yrep = ms$y_pred,
+    x = d$Y,
+    group = d$A,
+    facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))
+) +
     panel_bg(fill = "gray90", color = NA) +
     grid_lines(color = "white") +
     labs(x = "Observed y", y = "Predicted y", title = "50% and 80% posterior predictive interval of Y")
 ```
 
 ### Figure 5-4
-ノイズが正規分布に従うと仮定していたので, 後者のノイズの分布確認は, ノイズの分布と正規分布の比較をすればよい. 本ではヒストグラムを描いていたが, ここではより手軽にQQ-plotを使う.
-
-`ms$noise`は`.stan`内の`generated quantities`として生成されているとする(Exercise5-2).
-この`ms$noise`の最頻値を持つ`noise_df`を作ってプロットする.
-```{r noise_df, echo = TRUE}
-noise_df <- ms$noise %>%
-    apply(2, function(x) {
-        dens <- density(x)
-        mode_x <- dens$x[which.max(dens$y)]
-    }) %>%
-    data.frame() %>%
-    magrittr::set_colnames("err_mode") %>%
-    mutate(A = d$A) # optional. used only in geom_qq
+ノイズが正規分布に従うと仮定していたので, 後者のノイズの分布確認は, ノイズの分布と正規分布の比較をすればよい.
+ノイズのサンプルを得るには`bayesplot::ppc_error_data`が手軽.
+```{r err_raw}
+err_raw <- ppc_error_data(y = d$Y, yrep = ms$y_pred[, 1:50])
+err_raw %>% head()
 ```
-お手軽にプロットするならR base graphsが便利.
+
+これをもとにMCMCサンプルごとのノイズのMAP推定量を持つテーブルを作り, `geom_density`などに流し込む.
+ノイズの推定量は平均でもいいので, `err_map`だけでなく`err_mean`も作っているが, ここでは前者だけプロットする.
+```{r err_rep, message=FALSE}
+# function for calcualting the mode of column of table
+mode <- function(x) {
+    dens <- density(x)
+    dens$x[which.max(dens$y)]
+}
+# table of map noise
+err_rep <- err_raw %>%
+    group_by(y_id) %>%
+    summarise(err_map = mode(value), err_mean = mean(value)) %>%
+    mutate(A = factor(d$A))
+```
+`err_rep` の `err_map` 列を `geom_histogram` と `geom_density` でプロットし, 正規分布密度関数 `dnorm(0,ms$sigma %>% mean())` を破線で重ねて比較する.
+```{r map_noise_distribution, echo=TRUE, message=FALSE}
+sigma <- ms$sigma %>% mean()
+err_rep %>% ggplot(mapping = aes(x = err_map)) +
+    geom_histogram(aes(y = ..density..), binwidth = 0.01, color = "black", fill = "white") +
+    geom_density(fill = "black", alpha = 0.5) +
+    stat_function(fun = dnorm, args = list(mean = 0, sd = sigma), linetype = "dashed") +
+    labs(title = "Distribution of MAP Noise in MCMC Samples", x = "MAP Noise") +
+    xlim(xmin = -3 * sigma, xmax = 3 * sigma) +
+    theme(axis.ticks = element_blank(), axis.text.y = element_blank())
+```
+
+上でやった比較は分布の比較なので, ヒストグラムより手軽にQQ-plotを使ってもよい.
+こちらの方がだいぶお手軽.
 ```{r plot_qqnorm, echo = TRUE}
-qqnorm(noise_df$err_mode)
-qqline(noise_df$err_mode, col = "red")
+qqnorm(err_rep$err_map)
+qqline(err_rep$err_map, col = "red")
 ```
 
-カテゴリ変数`A`でプロットを分けたいなら`ggplot`の`geom_qq_xxxx`.
+カテゴリ変数`A`でプロットを色分けするならこう.
 ```{r plot_geom_qq, echo = TRUE}
-noise_df %>%
-    ggplot(mapping = aes(sample = err_mode, color = factor(A))) +
+err_rep %>%
+    ggplot(mapping = aes(sample = err_map, color = factor(A))) +
     geom_qq_line() +
     geom_qq() +
     guides(color = guide_legend("A")) +
@@ -116,8 +152,11 @@ data <- list(N = nrow(d), A = d$A, Score = d$Score / 200, M = d$M, Y = d$Y)
 - カテゴリ変数`A`: アルバイトが好きかどうか
 - 連続値変数`Score`: 学問への興味の強さ
 - 正整数変数`M`: 履修登録した科目の総授業回数
+
 の3変数で
+
 - 応答変数`Y`: 実際に出席した回数
+
 を二項ロジスティック回帰で説明する.
 
 ```{r model5-4_output, message = FALSE}
@@ -129,7 +168,13 @@ ms <- rstan::extract(fit)
 実測値と予測値をプロットする. Figure 5-4 とやることは同じ.
 ```{r Figure5-8, echo = TRUE}
 color_scheme_set("purple")
-bayesplot::ppc_intervals_grouped(y = d$Y, yrep = ms$y_pred, x = d$Y, group = d$A, facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))) +
+bayesplot::ppc_intervals_grouped(
+    y = d$Y,
+    yrep = ms$y_pred,
+    x = d$Y,
+    group = d$A,
+    facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))
+) +
     panel_bg(fill = "gray90", color = NA) +
     grid_lines(color = "white") +
     labs(x = "Observed y", y = "Predicted y", title = "50% and 80% posterior predictive interval of Y")
@@ -147,8 +192,11 @@ data <- list(N = nrow(d), A = d$A, Score = d$Score / 200, Weather = cdn[d$Weathe
 - カテゴリ変数`A`: アルバイトが好きかどうか
 - 連続値変数`Score`: 学問への興味の強さ
 - カテゴリ変数`Weather`: 当日の天気(晴れ, 曇り, 雨)
+
 の3変数で
+
 - 2値応答変数`Y`: その日出席したかどうか
+
 をロジスティック回帰で説明する.
 
 ```{r model5-5_output, message = FALSE}
@@ -156,11 +204,15 @@ fit <- stan(file = stan_path, data = data, seed = 1234)
 ms <- rstan::extract(fit)
 ```
 ### Figure 5-10
-予測された出席確率と実測値をプロットしてあてはまりの良さを確認する.
+予測された出席確率と実測値をプロットしてあてはまり具合を確認する.
 ここでは, `bayesplot::ppc_scatter_avg_data`で(実測値, 予測確率, カテゴリA)の情報を持ったデータフレームを吐かせ, それをもとに`ggplot`でヴァイオリンプロットを描く.
 ```{r figure5-10, echo = TRUE}
 # process data for plot
-data_plot <- bayesplot::ppc_scatter_avg_data(y = d$Y, yrep = ms$q, group = d$A) %>% transmute(A = group, y_obs = factor(y_obs), prob_pred = value)
+data_plot <- bayesplot::ppc_scatter_avg_data(
+    y = d$Y,
+    yrep = ms$q,
+    group = d$A
+) %>% transmute(A = group, y_obs = factor(y_obs), prob_pred = value)
 # plot
 data_plot %>%
     ggplot(aes(x = prob_pred, y = y_obs)) +
@@ -178,10 +230,14 @@ d <- get_data_from_url(data_url2)
 stan_path <- "./stan/model5-6exp.stan"
 data <- list(N = nrow(d), A = d$A, Score = d$Score / 200, M = d$M)
 ```
+
 - カテゴリ変数`A`: アルバイトが好きかどうか
 - 連続値変数`Score`: 学問への興味の強さ
+
 の2変数で
+
 - 正整数応答変数`M`: 履修登録した科目の総授業回数
+
 をPoisson回帰で説明する.
 
 ```{r model5-6_output, message = FALSE}
@@ -191,17 +247,27 @@ ms <- rstan::extract(fit)
 実測値と予測値のプロットは以前と同じ方法で書ける.
 ```{r plot_ppc_model5-6, echo = TRUE}
 color_scheme_set("purple")
-bayesplot::ppc_intervals_grouped(y = d$M, yrep = ms$m_pred, x = d$M, group = d$A, facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))) +
+bayesplot::ppc_intervals_grouped(
+    y = d$M,
+    yrep = ms$m_pred,
+    x = d$M,
+    group = d$A,
+    facet_args = list(scales = "fixed", labeller = as_labeller(c("0" = "A=0", "1" = "A=1")))
+) +
     panel_bg(fill = "gray90", color = NA) +
     grid_lines(color = "white") +
     labs(x = "Observed y", y = "Predicted y", title = "50% and 80% posterior predictive interval of M")
 ```
 
 `A`や`Score`の変動が応答変数`M`に与える限界効果は`bayesplot::mcmc_area`などでプロットできる. この場合, stanファイルの中で`exp(A)`などのプロットしたい変数のMCMCサンプルを生成しておく必要がある.
-```{r plot_MAE_model5-6, echo = TRUE, message=FALSE}
+```{r plot_AME_model5-6, echo = TRUE, message=FALSE}
 color_scheme_set("blue")
-mcmc_areas(fit, pars = c("A_MAE", "Score_MAE[10]", "Score_MAE[5]", "Score_MAE[1]"), prob = 0.90, prob_outer = 0.95) +
-    scale_y_discrete(labels = c("A_MAE" = "A 0->1", "Score_MAE[1]" = "Score +10", "Score_MAE[5]" = "Score +50", "Score_MAE[10]" = "Score +100")) +
+mcmc_areas(fit,
+    pars = c("A_AME", "Score_AME[10]", "Score_AME[5]", "Score_AME[1]"),
+    prob = 0.90,
+    prob_outer = 0.95
+) +
+    scale_y_discrete(labels = c("A_AME" = "A 0->1", "Score_AME[1]" = "Score +10", "Score_AME[5]" = "Score +50", "Score_AME[10]" = "Score +100")) +
     grid_lines(color = "gray80") +
     labs(title = "95% Posterior Credible Intervals of Marginal Effect of Score and A factor", x = "Marginal Effect on Y (times)")
 ```

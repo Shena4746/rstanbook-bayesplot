@@ -24,13 +24,13 @@ model {
 
 generated quantities {
 	int m_pred[N];
-	real Score_MAE[10];
-	real A_MAE;
+	real Score_AME[10];
+	real A_AME;
 	for (k in 1:N) {
 		m_pred[k] = poisson_rng(lambda[k]);
 	}
 	for (k in 1:10) {
-		Score_MAE[k] = exp(b[3]*k/20);
+		Score_AME[k] = exp(b[3]*k/20);
 	}
-	A_MAE = exp(b[2]);
+	A_AME = exp(b[2]);
 }
